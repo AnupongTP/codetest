@@ -1,0 +1,73 @@
+name: SMAP 5C fetch
+on:
+  push:
+    branches: [chatgpt-smap-5c-20261004]
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch SERVIR THREDDS SMAP subsets
+        shell: bash
+        run: |
+          python - <<'PY'
+          import os, json, requests
+          from urllib.parse import urlencode
+          os.makedirs("out", exist_ok=True)
+          s=requests.Session()
+          s.headers["User-Agent"]="PhayaoDrought-SMAP5C-QA/1.0"
+          # Catalog evidence
+          for u,n in [
+            ("https://csthredds.servirglobal.net/thredds/catalog/Agg/catalog.xml","catalog_Agg.xml"),
+            ("https://scapwms.servirglobal.net/thredds/climateserv_aggregated.html","climateserv_aggregated.html"),
+          ]:
+            try:
+              r=s.get(u,timeout=60)
+              open("out/"+n,"wb").write(r.content)
+              print(n,r.status_code,len(r.content),r.url)
+            except Exception as e: print("catalog err",u,repr(e))
+          candidates=[
+            "Agg/nsidc-smap_global_9km_daily.nc4",
+            "Agg/nsidc-smap_global_1km_daily.nc4",
+            "Agg/nsidc-smap_global_1km_15dy.nc4",
+          ]
+          bbox=dict(north=19.50,south=18.80,west=99.60,east=100.10)
+          start="2024-01-01T00:00:00Z"; end="2024-12-31T23:59:59Z"
+          results=[]
+          for ds in candidates:
+            desc=f"https://csthredds.servirglobal.net/thredds/ncss/grid/{ds}/dataset.xml"
+            try:
+              rr=s.get(desc,timeout=60)
+              open("out/"+ds.split("/")[-1]+".dataset.xml","wb").write(rr.content)
+              print("desc",ds,rr.status_code,len(rr.content),rr.url)
+            except Exception as e:
+              results.append({"dataset":ds,"stage":"desc","error":repr(e)}); continue
+            if rr.status_code!=200: continue
+            # Request bbox/time subset as netCDF4, then CSV as alternate.
+            for accept,ext in [("netcdf4","nc"),("csv","csv")]:
+              params={
+                "var":"soil_moisture",
+                **bbox,
+                "horizStride":1,
+                "time_start":start,
+                "time_end":end,
+                "timeStride":1,
+                "accept":accept,
+                "addLatLon":"true",
+              }
+              u=f"https://csthredds.servirglobal.net/thredds/ncss/grid/{ds}?"+urlencode(params)
+              try:
+                r=s.get(u,timeout=180)
+                fn="out/"+ds.split("/")[-1]+".2024_phayao."+ext
+                open(fn,"wb").write(r.content)
+                print("subset",ds,accept,r.status_code,len(r.content),r.headers.get("content-type"),r.url)
+                results.append({"dataset":ds,"accept":accept,"status":r.status_code,"size":len(r.content),"content_type":r.headers.get("content-type"),"url":r.url,"file":fn})
+              except Exception as e:
+                results.append({"dataset":ds,"accept":accept,"error":repr(e)})
+          open("out/results.json","w").write(json.dumps(results,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: smap-5c-fetch
+          path: out/
